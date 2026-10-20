@@ -45,46 +45,42 @@ export async function _isTrajectorySuperset(
   const outputToolCalls = _extractToolCalls(outputs);
   const referenceToolCalls = _extractToolCalls(referenceOutputs);
 
-  // Keep track of which reference tool calls have been matched
-  const matchedReferenceCalls = new Set<number>();
+  // Match reference calls to output calls as a bipartite matching: an
+  // output call can cover a reference call when the names are equal and
+  // the args match under the matcher. Greedy first-fit assignment is
+  // order-dependent (an early reference call can claim the only output
+  // call a later reference call could use), so find a maximum matching
+  // with augmenting paths (Kuhn's algorithm) instead.
+  // Maps output call index -> reference call index it is matched to.
+  const matchedOutputCalls = new Map<number, number>();
 
-  // For each reference tool call, find a matching output tool call
-  for (const refCall of referenceToolCalls) {
-    const refName = refCall.name;
-    const refArgs = refCall.args;
-
-    let foundMatch = false;
+  const tryAssign = async (refIdx: number, seen: Set<number>): Promise<boolean> => {
+    const refCall = referenceToolCalls[refIdx];
+    const matcher = _getMatcherForToolName(
+      refCall.name,
+      toolArgsMatchMode,
+      toolArgsMatchOverrides
+    );
     for (let outIdx = 0; outIdx < outputToolCalls.length; outIdx++) {
       const outCall = outputToolCalls[outIdx];
-      const outName = outCall.name;
-
-      // Names must match
-      if (refName !== outName) {
+      if (outCall.name !== refCall.name || seen.has(outIdx)) {
         continue;
       }
-
-      // If we're already using this output call for a different match, skip
-      if (matchedReferenceCalls.has(outIdx)) {
+      if (!(await matcher(outCall.args, refCall.args))) {
         continue;
       }
-
-      // Check tool args according to match mode
-      const matcher = _getMatcherForToolName(
-        refName,
-        toolArgsMatchMode,
-        toolArgsMatchOverrides
-      );
-
-      const outArgs = outCall.args;
-      if (await matcher(outArgs, refArgs)) {
-        matchedReferenceCalls.add(outIdx);
-        foundMatch = true;
-        break;
+      seen.add(outIdx);
+      const currentRef = matchedOutputCalls.get(outIdx);
+      if (currentRef === undefined || (await tryAssign(currentRef, seen))) {
+        matchedOutputCalls.set(outIdx, refIdx);
+        return true;
       }
     }
+    return false;
+  };
 
-    // If we didn't find a match for this reference call, we're not a superset
-    if (!foundMatch) {
+  for (let refIdx = 0; refIdx < referenceToolCalls.length; refIdx++) {
+    if (!(await tryAssign(refIdx, new Set<number>()))) {
       return false;
     }
   }

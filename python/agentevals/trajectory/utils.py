@@ -96,39 +96,35 @@ def _is_trajectory_superset(
     output_tool_calls = _extract_tool_calls(outputs)
     reference_tool_calls = _extract_tool_calls(reference_outputs)
 
-    # Keep track of which reference tool calls have been matched
-    matched_reference_calls = set()
+    # Match reference calls to output calls as a bipartite matching: an
+    # output call can cover a reference call when the names are equal and
+    # the args match under the matcher. Greedy first-fit assignment is
+    # order-dependent (an early reference call can claim the only output
+    # call a later reference call could use), so find a maximum matching
+    # with augmenting paths (Kuhn's algorithm) instead.
+    # Maps output call index -> reference call index it is matched to.
+    matched_output_calls: dict[int, int] = {}
 
-    # For each reference tool call, find a matching output tool call
-    for ref_call in reference_tool_calls:
-        ref_name = ref_call["name"]
-        ref_args = ref_call["args"]
-
-        found_match = False
+    def try_assign(ref_idx: int, seen: set[int]) -> bool:
+        ref_call = reference_tool_calls[ref_idx]
+        matcher = _get_matcher_for_tool_name(
+            ref_call["name"], tool_args_match_mode, tool_args_match_overrides
+        )
         for out_idx, out_call in enumerate(output_tool_calls):
-            out_name = out_call["name"]
-
-            # Names must match
-            if ref_name != out_name:
+            if out_call["name"] != ref_call["name"] or out_idx in seen:
                 continue
-
-            # If we're already using this output call for a different match, skip
-            if out_idx in matched_reference_calls:
+            if not matcher(out_call["args"], ref_call["args"]):
                 continue
+            seen.add(out_idx)
+            if out_idx not in matched_output_calls or try_assign(
+                matched_output_calls[out_idx], seen
+            ):
+                matched_output_calls[out_idx] = ref_idx
+                return True
+        return False
 
-            # Check tool args according to match mode
-            matcher = _get_matcher_for_tool_name(
-                ref_name, tool_args_match_mode, tool_args_match_overrides
-            )
-
-            out_args = out_call["args"]
-            if matcher(out_args, ref_args):
-                matched_reference_calls.add(out_idx)
-                found_match = True
-                break
-
-        # If we didn't find a match for this reference call, we're not a superset
-        if not found_match:
+    for ref_idx in range(len(reference_tool_calls)):
+        if not try_assign(ref_idx, set()):
             return False
 
     return True

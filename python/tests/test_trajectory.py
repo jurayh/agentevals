@@ -1248,3 +1248,69 @@ def test_tool_args_match_mode_exact(tool_args_match_mode, score):
     )
     evaluator_result = evaluator(outputs=outputs, reference_outputs=reference_outputs)
     assert evaluator_result["score"] == score
+
+
+def _tool_call_messages(calls):
+    return [
+        ChatCompletionMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(args),
+                    }
+                }
+                for name, args in calls
+            ],
+        )
+    ]
+
+
+@pytest.mark.langsmith
+def test_superset_match_is_not_greedy():
+    # A valid assignment exists ({"a": 1} -> {"a": 1}, {"a": 1, "b": 2} ->
+    # {"a": 1, "b": 2}), but greedy first-fit claims the larger output call
+    # for the smaller reference call and then fails the larger one.
+    evaluator = create_trajectory_match_evaluator(
+        trajectory_match_mode="superset", tool_args_match_mode="superset"
+    )
+    outputs = _tool_call_messages(
+        [("search", {"a": 1, "b": 2}), ("search", {"a": 1})]
+    )
+    reference_outputs = _tool_call_messages(
+        [("search", {"a": 1}), ("search", {"a": 1, "b": 2})]
+    )
+    assert evaluator(outputs=outputs, reference_outputs=reference_outputs)["score"]
+    # The verdict must not depend on the order of the output calls.
+    assert evaluator(
+        outputs=list(reversed(outputs)), reference_outputs=reference_outputs
+    )["score"]
+
+
+@pytest.mark.langsmith
+def test_unordered_match_is_not_greedy():
+    evaluator = create_trajectory_match_evaluator(
+        trajectory_match_mode="unordered", tool_args_match_mode="superset"
+    )
+    outputs = _tool_call_messages(
+        [("search", {"a": 1, "b": 2}), ("search", {"a": 1})]
+    )
+    reference_outputs = _tool_call_messages(
+        [("search", {"a": 1}), ("search", {"a": 1, "b": 2})]
+    )
+    assert evaluator(outputs=outputs, reference_outputs=reference_outputs)["score"]
+
+
+@pytest.mark.langsmith
+def test_superset_match_still_rejects_unmatchable_calls():
+    # Two identical reference calls cannot both be covered by one output call.
+    evaluator = create_trajectory_match_evaluator(
+        trajectory_match_mode="superset", tool_args_match_mode="superset"
+    )
+    outputs = _tool_call_messages([("search", {"a": 1, "b": 2})])
+    reference_outputs = _tool_call_messages(
+        [("search", {"a": 1}), ("search", {"a": 1})]
+    )
+    assert not evaluator(outputs=outputs, reference_outputs=reference_outputs)["score"]

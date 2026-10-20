@@ -1490,4 +1490,64 @@ ls.describe("trajectory", () => {
     });
     expect(evaluatorResult.score).toBe(score);
   });
+
+  ls.test("superset match is not greedy", { inputs: {} }, async () => {
+    const toolCallMessages = (calls: [string, Record<string, unknown>][]) => [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: calls.map(([name, args]) => ({
+          function: { name, arguments: JSON.stringify(args) },
+        })),
+      },
+    ] as FlexibleChatCompletionMessage[];
+    // A valid assignment exists ({"a": 1} -> {"a": 1}, {"a": 1, "b": 2} ->
+    // {"a": 1, "b": 2}), but greedy first-fit claims the larger output call
+    // for the smaller reference call and then fails the larger one.
+    const outputs = toolCallMessages([
+      ["search", { a: 1, b: 2 }],
+      ["search", { a: 1 }],
+    ]);
+    const referenceOutputs = toolCallMessages([
+      ["search", { a: 1 }],
+      ["search", { a: 1, b: 2 }],
+    ]);
+    const supersetEvaluator = createTrajectoryMatchEvaluator({
+      trajectoryMatchMode: "superset",
+      toolArgsMatchMode: "superset",
+    });
+    expect(
+      (await supersetEvaluator({ outputs, referenceOutputs })).score
+    ).toBe(true);
+    // The verdict must not depend on the order of the output calls.
+    expect(
+      (
+        await supersetEvaluator({
+          outputs: [...outputs].reverse(),
+          referenceOutputs,
+        })
+      ).score
+    ).toBe(true);
+    const unorderedEvaluator = createTrajectoryMatchEvaluator({
+      trajectoryMatchMode: "unordered",
+      toolArgsMatchMode: "superset",
+    });
+    expect(
+      (await unorderedEvaluator({ outputs, referenceOutputs })).score
+    ).toBe(true);
+    // Two identical reference calls cannot both be covered by one output call.
+    const singleOutput = toolCallMessages([["search", { a: 1, b: 2 }]]);
+    const duplicateRefs = toolCallMessages([
+      ["search", { a: 1 }],
+      ["search", { a: 1 }],
+    ]);
+    expect(
+      (
+        await supersetEvaluator({
+          outputs: singleOutput,
+          referenceOutputs: duplicateRefs,
+        })
+      ).score
+    ).toBe(false);
+  });
 });
